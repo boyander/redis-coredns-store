@@ -1,13 +1,13 @@
 package redis
 
 import (
-	// "fmt"
+	"strings"
 	"time"
 
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 	"golang.org/x/net/context"
-	"github.com/coredns/coredns/request"
 )
 
 // ServeDNS implements the plugin.Handler interface.
@@ -47,9 +47,22 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	record := redis.get(location, z)
 
+	//fmt.Printf("[Name]: %s [Type]: %s\n", qname, qtype)
+	//fmt.Printf("\t %+v\n", record)
+
 	switch qtype {
 	case "A":
-		answers, extras = redis.A(qname, z, record)
+		// Having a CNAME excludes A records, add cnames when querying for A records
+		if len(record.CNAME) > 0 {
+			//println("We have a cname in the record")
+			answers2 := make([]dns.RR, 0, 10)
+			extras2 := make([]dns.RR, 0, 10)
+			answers2, extras2 = redis.CNAME(qname, z, record)
+			answers = append(answers, answers2...)
+			extras = append(extras, extras2...)
+		} else {
+			answers, extras = redis.A(qname, z, record)
+		}
 	case "AAAA":
 		answers, extras = redis.AAAA(qname, z, record)
 	case "CNAME":
@@ -76,6 +89,24 @@ func (redis *Redis) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 
 	m.Answer = append(m.Answer, answers...)
 	m.Extra = append(m.Extra, extras...)
+
+	// If there is a CNAME RR in the answers, solve the alias
+	for _, CNAMERecord := range record.CNAME {
+		println(CNAMERecord.Host)
+		var query = strings.TrimSuffix(CNAMERecord.Host, "."+z.Name)
+		records := redis.get(query, z)
+
+		//fmt.Printf("\t %+v\n", records)
+		answersN := make([]dns.RR, 0, 10)
+		extrasN := make([]dns.RR, 0, 10)
+		answersN, extrasN = redis.A(CNAMERecord.Host, z, records)
+		m.Answer = append(m.Answer, answersN...)
+		m.Extra = append(m.Extra, extrasN...)
+
+		// println(query)
+		// println(location)
+	}
+	//println("END ANSWER")
 
 	state.SizeAndDo(m)
 	m = state.Scrub(m)
